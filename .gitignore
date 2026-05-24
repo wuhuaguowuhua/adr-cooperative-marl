@@ -49,3 +49,8 @@ paper_figs_v2/
 # Local launch scripts (not part of the public release)
 remote_launch_*.sh
 analyze_*.py
+
+# overcooked_pkg local install artifacts
+overcooked_pkg/overcooked_seac.egg-info/
+overcooked_pkg/build/
+overcooked_pkg/dist/

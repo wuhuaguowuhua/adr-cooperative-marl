@@ -38,10 +38,17 @@ algorithms (SEAC, MAA2C, MAPPO) on cooperative discrete-action benchmarks
 ├── storage.py                # rollout storage
 ├── envs.py                   # vectorized environment construction
 ├── wrappers.py               # episode statistics, reward shaping, time limits
-├── pettingzoo_wrapper.py     # PettingZoo bridge (used for Overcooked-AI)
+├── pettingzoo_wrapper.py     # PettingZoo bridge
 ├── evaluate.py               # post-training evaluation utility
 ├── utils.py                  # small utilities
-├── configs/                  # task config files (RWARE, LBF, PressurePlate)
+├── configs/                  # Sacred config files for each task family
+│   ├── rware*.yaml           # RWARE configs (tiny-2ag, small-4ag, etc.)
+│   ├── foraging*.yaml        # LBF-coop configs (8x8-2p-{1,2}f, 12x12-2p-3f)
+│   ├── overcooked*.yaml      # Overcooked-AI configs (forced_coordination,
+│   │                           cramped_room, coordination_ring, ...)
+│   └── pressureplate1.yaml   # PressurePlate (auxiliary)
+├── overcooked_pkg/           # standalone gym-env adapter for Overcooked-AI
+│   └── overcooked_seac/      # registers Overcooked-<layout>-v0 gym ids
 ├── requirements.txt          # pinned Python dependencies
 └── constraints.txt           # pip constraint file
 ```
@@ -64,16 +71,31 @@ requirements file:
 * LBF (`lbforaging`)
 * PressurePlate (`pressureplate`, optional)
 
-For Overcooked-AI experiments, additionally install the
+### Overcooked-AI setup
+
+Overcooked-AI experiments rely on the
 [`overcooked-ai`](https://github.com/HumanCompatibleAI/overcooked_ai) package
-and use the PettingZoo bridge (`pettingzoo_wrapper.py`).
+plus the lightweight gym-env adapter in `overcooked_pkg/`:
+
+```bash
+pip install overcooked-ai
+pip install -e ./overcooked_pkg
+```
+
+Installing `overcooked_pkg` in editable mode registers a set of
+`Overcooked-<layout>-v0` gym environment ids (e.g.
+`Overcooked-forced_coordination-v0`,
+`Overcooked-cramped_room-v0`,
+`Overcooked-coordination_ring-v0`) that `train.py` consumes through the
+same `envs.make_vec_envs` path as RWARE and LBF.
 
 ## Quick start
 
-ADR is configured through Sacred. A typical RWARE run looks like:
+ADR is configured through Sacred. The same `train.py` entry point dispatches
+to SEAC, MAA2C, MAPPO via `algorithm.name=...`.
 
 ```bash
-# Baseline (no ADR), SEAC on RWARE small-4ag, 40M env steps
+# Baseline (no ADR), SEAC on RWARE small-4ag
 python train.py with env_name=rware-small-4ag-v1 \
     algorithm.name=SEAC \
     algorithm.total_steps=40000000 \
@@ -94,10 +116,19 @@ python train.py with env_name=rware-small-4ag-v1 \
     seed=42
 ```
 
-The same `train.py` entry point dispatches to MAA2C / MAPPO via
-`algorithm.name=MAA2C` and `algorithm.name=MAPPO`. The full list of ADR
-knobs and their per-experiment calibrated values is given in Table 1 of the
-paper.
+```bash
+# MAPPO on Overcooked-AI forced_coordination
+python train.py with env_name=Overcooked-forced_coordination-v0 \
+    algorithm.name=MAPPO \
+    algorithm.total_steps=9000000 \
+    SND_DIVERSITY_COEF=1.0 \
+    SND_PROACTIVE_RAMP_END=0.05 \
+    SND_PROACTIVE_TIME_SHUTOFF=0.95 \
+    seed=42
+```
+
+The full list of ADR knobs and their per-experiment calibrated values is
+given in Table 1 of the paper.
 
 ## Reproducing the paper
 

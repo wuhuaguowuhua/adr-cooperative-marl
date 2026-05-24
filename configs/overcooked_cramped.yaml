@@ -1,0 +1,3 @@
+env_name: Overcooked-cramped_room-v0
+num_env_steps: 15000000.0
+time_limit: 400

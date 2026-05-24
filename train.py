@@ -40,6 +40,14 @@ try:
     import pressureplate  # noqa: F401  # registers pressureplate-linear-{4,5,6}p-v0
 except ImportError:
     pass
+try:
+    import box_pushing  # noqa: F401  # registers BoxPushing-LxL-2a-v0
+except ImportError:
+    pass
+try:
+    import overcooked_seac  # noqa: F401  # registers Overcooked-<layout>-v0
+except ImportError:
+    pass
 from typing import Optional
 import torch.nn.functional as F
 
@@ -77,13 +85,19 @@ ex = Experiment(ingredients=[algorithm])
 ex.captured_out_filter = lambda captured_output: "Output capturing turned off."
 ex.observers.append(FileStorageObserver("./results/sacred"))
 
-if _WANDB_OK and os.getenv("WANDB_DISABLED", "false").lower() not in ("true", "1"):
-    ex.observers.append(
-        WandbObserver(
-            project=os.getenv("WANDB_PROJECT", "seac-rware"),
-            entity=os.getenv("WANDB_ENTITY") or None,
-        )
-    )
+# DISABLED 2026-05-19 (zigzag fix): Sacred WandbObserver auto-syncs
+# _run.log_scalar(k, v, j) using sacred update-count j as step. wb_log
+# below uses env-step total_num_steps. Mixing creates a non-monotonic
+# wandb _step axis and produces vertical-jump artifacts on MAPPO. We
+# now initialise wandb directly in main() so the only wandb writes
+# come from explicit wb_log({...}, step=total_num_steps).
+# if _WANDB_OK and os.getenv("WANDB_DISABLED", "false").lower() not in ("true", "1"):
+#     ex.observers.append(
+#         WandbObserver(
+#             project=os.getenv("WANDB_PROJECT", "seac-rware"),
+#             entity=os.getenv("WANDB_ENTITY") or None,
+#         )
+#     )
 
 logging.basicConfig(
     level=logging.INFO,
@@ -231,6 +245,30 @@ def main(
     wandb_tags,
     wandb_project,
 ):
+
+    # Explicit wandb.init (replaces Sacred WandbObserver). All wandb
+    # writes flow through wb_log() with step=total_num_steps so the
+    # _step axis is monotonic in env-steps (no zigzag).
+    if _WANDB_OK and os.getenv("WANDB_DISABLED", "false").lower() not in ("true", "1"):
+        import wandb as _wandb
+        _wandb.init(
+            project=os.getenv("WANDB_PROJECT", "seac-rware"),
+            entity=os.getenv("WANDB_ENTITY") or None,
+            group=os.getenv("WANDB_RUN_GROUP"),
+            name=os.getenv("WANDB_RUN_NAME") or wandb_run_name,
+            tags=wandb_tags if wandb_tags else None,
+            reinit=True,
+            dir=os.getenv("WANDB_DIR") or None,
+            config={
+                "env_name": env_name,
+                "seed": seed,
+                "num_env_steps": num_env_steps,
+                "algorithm": algorithm,
+                "time_limit": time_limit,
+                "ALGO": os.getenv("ALGO", "a2c"),
+                **{k: os.getenv(k) for k in os.environ if k.startswith("SND_")},
+            },
+        )
 
     if loss_dir:
         loss_dir = path.expanduser(loss_dir.format(id=str(_run._id)))

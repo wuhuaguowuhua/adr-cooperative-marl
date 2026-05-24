@@ -112,46 +112,59 @@ class ClearInfo(gym.Wrapper):
 
 
 class PressurePlateRewardShaper(gym.Wrapper):
-    """v3: sparse, event-driven, strictly positive rewards for PressurePlate.
+    """v4: potential-based distance + chain-stage entry bonuses.
 
-    v1 (raw rewards in [-3, 0]): both baseline and RCDC stuck at -4640 for
-       30M steps. Diagnosis: feedback gate breaks on negative reward
-       normalisation; baseline can't escape "wrong-room" -3 noise floor.
+    DIAGNOSIS OF v3 FAILURE (stuck at 50.000):
+      Only agent 0 starts in its correct room: all four agents spawn in
+      room 0, but agents 1/2/3 are assigned to rooms 1/2/3 respectively.
+      The v3 in_room_reward (+0.1/step) was therefore visible only to
+      agent 0, which converged on the trivial policy "stand still in
+      starting room"  ==>  0.1 * 500 = 50.000 per episode, deterministic,
+      no exploration.  Agents 1/2/3 had identically zero learning signal,
+      and RCDC's diversity gradient further destabilised the only agent
+      (agent 0) that had any signal to learn from.
 
-    v2 (uniform +3 shift): random ep total = +1387, after 13M still +1370.
-       Diagnosis: the shift introduces a HUGE constant baseline (1387) that
-       only changes by ~10% when fully learned (1500). Signal-to-noise too
-       low; SEAC's advantage estimate is dominated by the value-function
-       baseline and yields a near-zero gradient.
+    v4 strategy:
+      (i)   remove the in_room_reward (eliminates the 50.000 attractor),
+      (ii)  install a potential-based Manhattan-distance shaping per agent
+            (telescoping --> preserves the cooperative optimum),
+      (iii) add a chain_entry_bonus the first time *any* agent enters
+            room k (for k=1,2,3) --- this rewards downstream unlocking
+            so agents 1/2/3 get a strong, attributable upstream-progress
+            signal even before they reach their own plates.
 
-    v3 (this) replaces the dense shaping with an event-driven sparse signal:
-      - +on_plate_reward (default +1.0) per step ONLY if agent is ON their
-        assigned plate. For the last agent the "plate" is the goal cell.
-      - +in_room_reward (default +0.1) per step if agent is in their correct
-        room but NOT on the plate. This gives wrong-room agents a weak but
-        non-zero gradient the moment a door opens and they cross over.
-      - +entry_bonus (default +10) the first time each agent reaches their
-        plate in an episode (one-shot, encourages exploration that finds
-        the plate at least once).
-      - +terminal_bonus (default +50) per agent on goal achievement (NOT on
-        TimeLimit truncation).
+    Per-agent reward components (v4):
+      - shaped(t) = k_dist * (d_prev - d_curr)         (k_dist = 0.5)
+            where d = Manhattan distance from agent to its target cell
+            (plate i for i < N-1, goal for i = N-1).  Telescoping.
+      - on_plate_reward   = +1.0 / step on target
+      - entry_bonus       = +30.0 one-shot, first time agent reaches plate
+      - chain_entry_bonus = +30.0 one-shot (TEAM reward), first time any
+                            agent enters room k for k=1,2,3
+      - terminal_bonus    = +100.0 per agent on goal achievement
+                            (NOT on TimeLimit truncation)
 
-    Predicted scale:
-      - random policy episode total ~ +110 (agent 0 occasionally on plate 0)
-      - solved policy episode total ~ +2240 (all on plates + entries + term.)
-      - signal-to-noise ratio ~ 20x, well above the ~1.1x in v2.
+    Predicted scale (smoke test target):
+      - random episode total      ~ 0..50
+      - solved episode total      ~ 1200..1500
+      - signal-to-noise ratio     ~ 30x   (clean signal vs. v3's degenerate
+                                           50.000 attractor)
 
-    No-op for non-PressurePlate envs (so the wrapper can stay in the global
-    default wrapper list without affecting RWARE/LBF).
+    No-op for non-PressurePlate envs.
     """
 
-    def __init__(self, env, on_plate_reward=1.0, in_room_reward=0.1,
-                 entry_bonus=10.0, terminal_bonus=50.0):
+    def __init__(self, env,
+                 on_plate_reward=1.0,
+                 entry_bonus=30.0,
+                 terminal_bonus=100.0,
+                 chain_entry_bonus=30.0,
+                 distance_coef=0.5):
         super().__init__(env)
         self.on_plate_reward = float(on_plate_reward)
-        self.in_room_reward = float(in_room_reward)
         self.entry_bonus = float(entry_bonus)
         self.terminal_bonus = float(terminal_bonus)
+        self.chain_entry_bonus = float(chain_entry_bonus)
+        self.distance_coef = float(distance_coef)
 
         spec_id = ""
         try:
@@ -159,12 +172,35 @@ class PressurePlateRewardShaper(gym.Wrapper):
         except Exception:
             pass
         self._active = spec_id.lower().startswith("pressureplate")
-        self._on_plate_seen = None  # populated in reset()
+
+        self._on_plate_seen = None
+        self._prev_dist = None
+        self._room_seen = None  # room k entry flag for k=1..N-1
+
+    def _target_xy(self, i, n):
+        u = self.unwrapped
+        if i == n - 1:
+            return u.goal.x, u.goal.y
+        return u.plates[i].x, u.plates[i].y
 
     def reset(self, **kwargs):
         obs = self.env.reset(**kwargs)
         if self._active:
-            self._on_plate_seen = [False] * self.unwrapped.n_agents
+            u = self.unwrapped
+            n = u.n_agents
+            self._on_plate_seen = [False] * n
+            self._prev_dist = [
+                abs(u.agents[i].x - self._target_xy(i, n)[0])
+                + abs(u.agents[i].y - self._target_xy(i, n)[1])
+                for i in range(n)
+            ]
+            # Chain-entry flag: index k corresponds to "any agent first in room k".
+            self._room_seen = [False] * n
+            # Mark the starting room (typically room 0) as already seen so we
+            # never pay a chain bonus for staying put.
+            start_room = u._get_curr_room_reward(u.agents[0].y)
+            if 0 <= start_room < n:
+                self._room_seen[start_room] = True
         return obs
 
     def step(self, action):
@@ -172,33 +208,40 @@ class PressurePlateRewardShaper(gym.Wrapper):
         if not self._active:
             return obs, reward, done, info
 
-        u = self.unwrapped  # raw PressurePlate env (exposes agents/plates/goal)
+        u = self.unwrapped
         n = u.n_agents
         new_reward = [0.0] * n
         if self._on_plate_seen is None:
             self._on_plate_seen = [False] * n
+        if self._prev_dist is None:
+            self._prev_dist = [0.0] * n
+        if self._room_seen is None:
+            self._room_seen = [False] * n
 
         for i, agent in enumerate(u.agents):
-            # Target cell: plate i for agents 0..N-2, the goal cell for agent N-1.
-            if i == n - 1:
-                tx, ty = u.goal.x, u.goal.y
-            else:
-                tx, ty = u.plates[i].x, u.plates[i].y
+            tx, ty = self._target_xy(i, n)
+
+            d_curr = abs(agent.x - tx) + abs(agent.y - ty)
+            # Potential-based Manhattan shaping: + as agent gets closer.
+            new_reward[i] += self.distance_coef * (self._prev_dist[i] - d_curr)
+            self._prev_dist[i] = d_curr
 
             on_target = (agent.x == tx and agent.y == ty)
-            curr_room = u._get_curr_room_reward(agent.y)
-            in_correct_room = (i == curr_room)
-
             if on_target:
                 new_reward[i] += self.on_plate_reward
                 if not self._on_plate_seen[i]:
                     new_reward[i] += self.entry_bonus
                     self._on_plate_seen[i] = True
-            elif in_correct_room:
-                new_reward[i] += self.in_room_reward
-            # else: 0 (wrong room, no signal)
 
-        # Terminal success bonus on goal achievement (not timeout)
+            # Chain-entry team bonus: any agent newly entering room k
+            # (k=1..N-1) earns the bonus shared by all agents.
+            curr_room = u._get_curr_room_reward(agent.y)
+            if 0 < curr_room < n and not self._room_seen[curr_room]:
+                self._room_seen[curr_room] = True
+                for j in range(n):
+                    new_reward[j] += self.chain_entry_bonus
+
+        # Terminal success bonus on goal achievement (not timeout).
         if all(done) and not info.get("TimeLimit.truncated", False):
             new_reward = [r + self.terminal_bonus for r in new_reward]
 
