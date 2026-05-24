@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+adr-env/
+venv/
+.venv/
+env/
+
+# Experiment artifacts
+wandb/
+runs/
+outputs/
+results/
+pretrained/
+logs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Sacred / FileStorageObserver
+my_runs/
+_sources/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Tensorboard
+events.out.tfevents.*
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Paper figures (kept in the paper repo)
+paper_figs/
+paper_figs_v2/
+
+# Local launch scripts (not part of the public release)
+remote_launch_*.sh
+analyze_*.py
