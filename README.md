@@ -45,11 +45,13 @@ algorithms (SEAC, MAA2C, MAPPO) on cooperative discrete-action benchmarks
 ├── configs/                  # Sacred config files for each task family
 │   ├── rware*.yaml           # RWARE configs (tiny-2ag, small-4ag, etc.)
 │   ├── foraging*.yaml        # LBF-coop configs (8x8-2p-{1,2}f, 12x12-2p-3f)
+│   ├── paper_*.yaml          # exact matched-ablation task/budget configs
 │   ├── overcooked*.yaml      # Overcooked-AI configs (forced_coordination,
 │   │                           cramped_room, coordination_ring, ...)
 │   └── pressureplate1.yaml   # PressurePlate (auxiliary)
 ├── launch_p0_rware.sh        # four-arm SEAC + RWARE schedule comparison
 ├── launch_p0_lbf.sh          # four-arm MAA2C + LBF schedule comparison
+├── test_snd_monitor.py       # static/linear schedule unit tests
 ├── overcooked_pkg/           # standalone gym-env adapter for Overcooked-AI
 │   └── overcooked_seac/      # registers Overcooked-<layout>-v0 gym ids
 ├── requirements.txt          # pinned Python dependencies
