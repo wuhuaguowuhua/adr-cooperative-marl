@@ -10,7 +10,7 @@ class SNDMonitor:
 
     Uses dual-rate reward EMA to compute a continuous diversity coefficient eta(t).
 
-    Four trigger modes:
+    Six trigger modes:
       - "rising":     eta ∝ positive reward velocity (active during rapid improvement)
       - "stagnation": eta ∝ reward flatness (active during plateaus)
       - "proactive":  eta = 1.0 before rewards appear, 0 after (early exploration only)
@@ -20,6 +20,8 @@ class SNDMonitor:
                       falsified (reward drops while eta active) direction slides
                       toward 0 and can cross into suppress territory. Turns the
                       hand-set sign of global_coef into an online adaptive signal.
+      - "static":     eta = eta_max throughout training (controlled reference)
+      - "linear":     eta = eta_max * (1 - progress) (controlled reference)
 
     Gated by reward_level_threshold to protect early learning (rising/stagnation modes).
     """
@@ -164,9 +166,24 @@ class SNDMonitor:
         trigger="rising":     high when reward is actively improving
         trigger="stagnation": high when reward is flat
         trigger="proactive":  1.0 before rewards appear, 0 after
+        trigger="feedback":   reward-coupled ramp, ceiling, and shutoff controller
+        trigger="static":     eta_max throughout training
+        trigger="linear":     eta_max * (1 - progress)
 
         Gated by reward_level_threshold to protect early learning (rising/stagnation).
         """
+        # --- Non-adaptive reference schedules (controlled ablation) ---
+        # These bypass ALL gating/feedback machinery so that the contribution
+        # of the adaptive controller can be isolated from the diversity loss.
+        if self.trigger == "static":
+            # Fixed-coefficient diversity regularization, active for the whole run.
+            self._eta = self.eta_max
+            return self._eta
+        if self.trigger == "linear":
+            # Standard linear annealing from eta_max down to 0 at end of training.
+            self._eta = self.eta_max * max(0.0, 1.0 - progress)
+            return self._eta
+
         if progress < self.warmup_ratio:
             self._eta = 0.0
             return 0.0

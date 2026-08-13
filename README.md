@@ -9,8 +9,10 @@ ADR adds a single auxiliary loss term to the actor objective, with a
 time-varying coefficient that is ramped up proactively at initialization,
 attenuated through a soft ceiling tied to realized inter-agent diversity, and
 withdrawn through either a reward-gated trigger or a time-gated truncation.
-The three task-dependent knobs are derived in closed form from two observable
-task statistics, removing the need for per-task grid search.
+Most closed-loop settings initialize three task-dependent knobs from two
+statistics of a short baseline pilot. Documented guard and open-loop variants
+cover boundary cases. This protocol reduces, rather than eliminates,
+task-specific calibration.
 
 This code base supports running ADR on top of three actor-based MARL
 algorithms (SEAC, MAA2C, MAPPO) on cooperative discrete-action benchmarks
@@ -26,9 +28,8 @@ algorithms (SEAC, MAA2C, MAPPO) on cooperative discrete-action benchmarks
 ├── ippo.py                   # independent PPO
 ├── maa2c.py                  # centralized-critic A2C (MAA2C)
 ├── mappo.py                  # centralized-critic clipped PPO (MAPPO)
-├── pg_asnd.py                # ADR controller (eta(t) schedule, soft ceiling,
-│                             #   reward-gated / time-gated shutoffs)
-├── snd_monitor.py            # action-distribution diversity monitor
+├── snd_monitor.py            # ADR controller, diversity monitor, and schedules
+├── pg_asnd.py                # legacy policy-gradient diversity controller
 ├── snd_rescale.py            # adaptive rescaling of diversity coefficient
 ├── snd_rescale_metrics.py    # diversity metrics for logging
 ├── state_diversity.py        # count-based state-visitation diversity (baseline)
@@ -47,6 +48,8 @@ algorithms (SEAC, MAA2C, MAPPO) on cooperative discrete-action benchmarks
 │   ├── overcooked*.yaml      # Overcooked-AI configs (forced_coordination,
 │   │                           cramped_room, coordination_ring, ...)
 │   └── pressureplate1.yaml   # PressurePlate (auxiliary)
+├── launch_p0_rware.sh        # four-arm SEAC + RWARE schedule comparison
+├── launch_p0_lbf.sh          # four-arm MAA2C + LBF schedule comparison
 ├── overcooked_pkg/           # standalone gym-env adapter for Overcooked-AI
 │   └── overcooked_seac/      # registers Overcooked-<layout>-v0 gym ids
 ├── requirements.txt          # pinned Python dependencies
@@ -91,59 +94,86 @@ same `envs.make_vec_envs` path as RWARE and LBF.
 
 ## Quick start
 
-ADR is configured through Sacred. The same `train.py` entry point dispatches
-to SEAC, MAA2C, MAPPO via `algorithm.name=...`.
+Sacred named configs select the task. The `ALGO` environment variable selects
+the learner: `a2c` (default, SEAC update), `maa2c`, `mappo`, or `ippo`.
+ADR itself is configured through `SND_*` environment variables.
 
 ```bash
 # Baseline (no ADR), SEAC on RWARE small-4ag
-python train.py with env_name=rware-small-4ag-v1 \
-    algorithm.name=SEAC \
-    algorithm.total_steps=40000000 \
-    seed=42
+ALGO=a2c SND_ENABLE=0 python train.py with paper_rware_seac \
+    algorithm.seed=42
 ```
 
 ```bash
-# ADR-augmented run with the closed-form calibrated controller
-python train.py with env_name=rware-small-4ag-v1 \
-    algorithm.name=SEAC \
-    algorithm.total_steps=40000000 \
-    SND_DIVERSITY_COEF=1.0 \
-    SND_PROACTIVE_RAMP_END=0.0375 \
-    SND_PROACTIVE_SHUTOFF=1.00 \
-    SND_PROACTIVE_REWARD_THRESH=1.0 \
-    SND_PROACTIVE_MIN_PROGRESS=0.40 \
-    SND_DIVERSITY_CEILING=0.50 \
-    seed=42
+# ADR on the same task
+ALGO=a2c \
+SND_ENABLE=1 SND_LOSS_MODE=rcdc SND_TRIGGER=feedback SND_METRIC=l2 \
+SND_DIVERSITY_COEF=0.1 SND_ETA_MAX=0.10 \
+SND_WARMUP_RATIO=0.0375 \
+SND_PROACTIVE_RAMP_END=0.225 SND_PROACTIVE_RAMP_POWER=2.0 \
+SND_PROACTIVE_TIME_SHUTOFF=1.0 SND_DIVERSITY_CEILING=1.0 \
+SND_FEEDBACK_MIN_PEAK=1.0 SND_FEEDBACK_MIN_PROGRESS=0.40 \
+python train.py with paper_rware_seac algorithm.seed=42
 ```
+
+Set `WANDB_PROJECT`, `WANDB_RUN_GROUP`, and `WANDB_RUN_NAME` to organize
+optional W&B logging. Authentication is handled by `wandb login`; no
+credential is required by the launch scripts.
+
+The full list of ADR knobs, including documented boundary variants, is given
+in the calibration table of the paper.
+
+## Controlled schedule ablation
+
+The post-review comparison separates the ADR controller from the auxiliary
+diversity loss using four matched arms:
+
+| Arm | Setting |
+| --- | --- |
+| Baseline | `SND_ENABLE=0` |
+| Static | `SND_TRIGGER=static`, `eta(t) = eta_max` |
+| Linear | `SND_TRIGGER=linear`, `eta(t) = eta_max * (1 - progress)` |
+| ADR | `SND_TRIGGER=feedback`, with the paper's calibrated controller |
+
+The two reported matched comparisons can be reproduced directly:
 
 ```bash
-# MAPPO on Overcooked-AI forced_coordination
-python train.py with env_name=Overcooked-forced_coordination-v0 \
-    algorithm.name=MAPPO \
-    algorithm.total_steps=9000000 \
-    SND_DIVERSITY_COEF=1.0 \
-    SND_PROACTIVE_RAMP_END=0.05 \
-    SND_PROACTIVE_TIME_SHUTOFF=0.95 \
-    seed=42
+# SEAC + rware-small-4ag-v1, 40M steps, seeds 42/123/456
+WANDB_PROJECT=adr-p0-rware ./launch_p0_rware.sh
+
+# MAA2C + Foraging-8x8-2p-1f-coop-v1, 40M steps, seeds 42/123/456
+WANDB_PROJECT=adr-p0-lbf ./launch_p0_lbf.sh
 ```
 
-The full list of ADR knobs and their per-experiment calibrated values is
-given in Table 1 of the paper.
+The scripts run sequentially by default to avoid oversubscribing shared
+machines. Runs can be restricted without editing the scripts:
+
+```bash
+# Smoke-test one arm and one seed
+ARMS=static SEEDS=42 WANDB_DISABLED=true ./launch_p0_rware.sh
+
+# Print commands without starting training
+DRY_RUN=1 ./launch_p0_lbf.sh
+```
+
+Static and linear bypass all feedback, ceiling, ramp, and shutoff logic while
+using the same peak coefficient as ADR. The named configs
+`paper_rware_seac` and `paper_lbf_maa2c` fix the exact environments, horizon,
+and training budget used in the controlled comparison.
 
 ## Reproducing the paper
 
-Each of the nine `<algorithm, environment>` experiments reported in the paper
-corresponds to one Sacred configuration. The four sample-efficiency
-experiments (SEAC and MAA2C on RWARE/LBF) use the closed-form calibration
-described in Section 3.7 of the paper; the remaining configurations
-(MAPPO on RWARE/LBF and the three Overcooked-AI experiments) use the open-loop
-proactive boundary variant of the same controller with a single
-`SND_PROACTIVE_TIME_SHUTOFF` value.
+The paper evaluates nine algorithm--task configurations across SEAC, MAA2C,
+MAPPO, RWARE, LBF-coop, and Overcooked-AI. Most closed-loop rows initialize
+the adaptive knobs from a baseline pilot; reward-guard and open-loop boundary
+variants are listed explicitly in the paper's calibration table.
 
-The calibrated knobs and base-learner hyperparameters listed in the paper are
-sufficient to reproduce every run. Each run was launched with multiple
-independent random seeds; we report the per-step mean across seeds with
-mean ± SEM envelopes.
+Use `ALGO` for the learner, a named config (or an explicit `env_name`
+override) for the task, and the listed `SND_*` values for ADR. Baseline and
+ADR comparisons use paired seed sets. Sample efficiency is normalized reward
+area under the complete learning curve (N-AUC), and final reward is averaged
+over the last two million environment steps. Paper curves use a centered
+one-million-step moving average and mean ± SEM envelopes.
 
 ## Citing
 
